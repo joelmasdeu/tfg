@@ -1,0 +1,350 @@
+---
+title: "TFG - 4. Anàlisi financera"
+author: "Joel Masdeu"
+date: "2026-06-06"
+output:
+  pdf_document: default
+  html_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE, error = FALSE)
+```
+
+```{r}
+library(dplyr)
+library(lubridate)
+library(ggplot2)
+library(zoo)
+library(tidyr)
+#install.packages("tidyquant")
+library(tidyquant)
+library(corrplot)
+library(scales)
+```
+
+# 4.1. Anàlisi descriptiva i financera
+## Lectura de la base de dades i agrupació per mesos
+
+```{r}
+dades_netes <- readRDS("C:/Users/joelm/Downloads/TFG/dades_netes.rds")
+summary(dades_netes)
+
+llista_cartes <- unique(dades_netes$ID_Card)
+llista_resultats <- list()
+
+for (carta_id in llista_cartes) {
+  df_temp <- dades_netes %>%
+    filter(ID_Card == carta_id) %>%
+    mutate(Mes_Any = floor_date(Date, "month")) %>%
+    group_by(Mes_Any) %>%
+    summarise(Preu_Mensual = mean(Price, na.rm = TRUE), .groups = 'drop') %>%
+    complete(Mes_Any = seq(min(Mes_Any), max(Mes_Any), by = "month")) %>%
+    mutate(Preu_Mensual = na.locf(Preu_Mensual, na.rm = FALSE)) %>%
+    mutate(Preu_Mensual = na.locf(Preu_Mensual, fromLast = TRUE)) %>%
+    mutate(ID_Card = carta_id) 
+  
+    llista_resultats[[as.character(carta_id)]] <- df_temp
+}
+
+base_dades_mensual <- bind_rows(llista_resultats)
+
+bd_mensual <- base_dades_mensual %>%
+  select(ID_Card, Mes_Any, Preu_Mensual)
+
+saveRDS(bd_mensual, "C:/Users/joelm/Downloads/TFG/bd_mensual.rds")
+
+bd_mensual <- bd_mensual %>%
+  left_join(dades_netes %>% select(ID_Card, Vintage) %>% distinct(), by = "ID_Card")
+```
+
+## Càlcul de les mètriques financeres principals
+
+```{r}
+metriques_cartes <- bd_mensual %>%
+  group_by(ID_Card, Vintage) %>%
+  arrange(Mes_Any) %>%
+  mutate(
+    # Rendiment simple respecte al mes anterior
+    Rendiment_Simple = (Preu_Mensual - lag(Preu_Mensual)) / lag(Preu_Mensual),
+    # Preu Màxim Històric (per al drawdown)
+    Max_Preu = cummax(Preu_Mensual),
+    Drawdown = (Preu_Mensual - Max_Preu) / Max_Preu
+  ) %>%
+  summarise(
+    Preu_Inicial = first(Preu_Mensual),
+    Preu_Final = last(Preu_Mensual),
+    Preu_Maxim = max(Preu_Mensual),
+    
+    # Rendiment Acumulat (ROI) -> per a transformar despres en cagr
+    ROI_perc = ((Preu_Final - Preu_Inicial) / Preu_Inicial) * 100,
+    
+    # Volatilitat anualitzada
+    Volatilitat_Anualitzada = sd(Rendiment_Simple, na.rm = TRUE) * sqrt(12) * 100,
+    
+    # Maximum Drawdown
+    Max_Drawdown_perc = min(Drawdown, na.rm = TRUE) * 100,
+    
+    # CAGR (rendiments anualitzats)
+    Anys = as.numeric(difftime(last(Mes_Any), first(Mes_Any), units = "days")) / 365.25,
+    .groups = 'drop'
+  ) %>%
+  mutate(
+    CAGR_perc = ((Preu_Final / Preu_Inicial)^(1 / Anys) - 1) * 100
+  )
+```
+
+## Índexs base 100 vintage vs modernes
+```{r}
+# Càlcul index base 100 equiponderat
+
+index_mercat <- bd_mensual %>%
+  group_by(ID_Card) %>%
+  arrange(Mes_Any) %>%
+  mutate(
+    Index_Individual = (Preu_Mensual / first(Preu_Mensual)) * 100
+  ) %>%
+  ungroup() %>%
+  group_by(Vintage, Mes_Any) %>%
+  summarise(
+    Index_Base100 = mean(Index_Individual, na.rm = TRUE), 
+    .groups = 'drop'
+  )
+
+```
+
+### opcio A: tall a 2021 per garantir completitud en la mostra
+```{r}
+
+data_inici_estricta <- bd_mensual %>%
+  group_by(ID_Card) %>%
+  summarise(Primera_Data = min(Mes_Any), .groups = 'drop') %>%
+  pull(Primera_Data) %>%
+  max()
+
+# index base 100
+index_mercat_opcioA <- bd_mensual %>%
+  filter(Mes_Any >= data_inici_estricta) %>%
+  group_by(ID_Card) %>%
+  arrange(Mes_Any) %>%
+  mutate(
+    Index_Individual = (Preu_Mensual / first(Preu_Mensual)) * 100
+  ) %>%
+  ungroup() %>%
+  group_by(Vintage, Mes_Any) %>%
+  summarise(
+    Index_Base100 = mean(Index_Individual, na.rm = TRUE),
+    .groups = 'drop'
+  )
+
+#grafic
+ggplot(index_mercat_opcioA, aes(x = Mes_Any, y = Index_Base100, group = Vintage, color = Vintage)) +
+  geom_line(linewidth = 1.2) +
+  scale_color_manual(values = c("Vintage" = "#00BFC4", "Moderna" = "#F8766D")) +
+  scale_x_date(date_breaks = "1 year", date_labels = "%Y") +
+  theme_minimal() +
+  labs(title = "Evolució de l'Índex Base 100 Equiponderat",
+       x = "Temps",
+       y = "Índex Base 100",
+       color = "Categoria") +
+  theme(legend.position = "bottom")
+
+```
+
+### opcio B (definitiva): sense talls a les dades, entrades dinamiques
+```{r}
+bd_mensual_neta <- bd_mensual %>%
+  filter(Mes_Any <= as.Date("2025-12-01"))
+
+# index base 100
+index_mercat_opcioB <- bd_mensual_neta %>%
+  group_by(ID_Card) %>%
+  arrange(Mes_Any) %>%
+  mutate(
+    Index_Individual = (Preu_Mensual / first(Preu_Mensual)) * 100
+  ) %>%
+  ungroup() %>%
+  group_by(Vintage, Mes_Any) %>%
+  summarise(
+    Index_Base100 = mean(Index_Individual, na.rm = TRUE),
+    .groups = 'drop'
+  )
+
+#grafic
+ggplot(index_mercat_opcioB, aes(x = Mes_Any, y = Index_Base100, group = Vintage, color = Vintage)) +
+  geom_line(linewidth = 1.2) +
+  scale_color_manual(values = c("Vintage" = "#00BFC4", "Moderna" = "#F8766D")) +
+  scale_x_date(date_breaks = "1 year", date_labels = "%Y") +
+  theme_minimal() +
+  labs(title = "Evolució de l'Índex Base 100 Equiponderat",
+       x = "Temps",
+       y = "Índex Base 100",
+       color = "Categoria") +
+  theme(legend.position = "bottom")
+```
+
+
+# 4.2. Correlació amb opcions d’inversió populars 
+
+```{r}
+# definir actius: S&P 500, Or, Bitcoin
+tickers <- c("^GSPC", "GC=F", "BTC-USD")
+
+dades_externes <- tq_get(tickers,
+                         get  = "stock.prices",
+                         from = "2016-01-01",
+                         to   = "2025-12-31")
+
+# passem les dades a mensuals ja que estan en diaries. agafem directament el tancament mensual
+externes_mensual <- dades_externes %>%
+  group_by(symbol) %>%
+  tq_transmute(select     = adjusted,
+               mutate_fun = to.monthly,
+               indexAt    = "lastof") %>%
+  ungroup() %>%
+  mutate(Mes_Any = as.Date(paste0(format(date, "%Y-%m"), "-01"))) %>%
+  select(symbol, Mes_Any, adjusted) %>%
+  group_by(symbol) %>%
+  arrange(Mes_Any) %>%
+  mutate(
+    Rendiment = (adjusted - lag(adjusted)) / lag(adjusted)
+  ) %>%
+  ungroup()
+
+retorns_macro <- externes_mensual %>%
+  select(Mes_Any, symbol, Rendiment) %>%
+  pivot_wider(names_from = symbol, values_from = Rendiment) %>%
+  rename(SP500 = `^GSPC`, Gold = `GC=F`, Bitcoin = `BTC-USD`)
+
+# creem les columnes amb rendiments de cartes vintage i modernes
+retorns_pokemon <- index_mercat_opcioB %>%
+  group_by(Vintage) %>%
+  arrange(Mes_Any) %>%
+  mutate(
+    Rendiment = (Index_Base100 - lag(Index_Base100)) / lag(Index_Base100)
+  ) %>%
+  ungroup() %>%
+  select(Mes_Any, Vintage, Rendiment) %>%
+  pivot_wider(names_from = Vintage, values_from = Rendiment) %>%
+  rename(Poke_Moderna = Moderna, Poke_Vintage = Vintage)
+
+# totes les dades en una
+bd_correlacions <- inner_join(retorns_pokemon, retorns_macro, by = "Mes_Any") %>%
+  drop_na() 
+
+# preparem matriu correlacio
+matriu_dades <- bd_correlacions %>% select(-Mes_Any)
+matriu_corr <- cor(matriu_dades, method = "pearson", use = "complete.obs")
+
+print(round(matriu_corr, 3))
+```
+
+## Comparació evolucions: Índex Base 100
+```{r}
+index_macro <- externes_mensual %>%
+  filter(Mes_Any >= min(index_mercat_opcioB$Mes_Any)) %>%
+  group_by(symbol) %>%
+  arrange(Mes_Any) %>%
+  mutate(
+    Index_Base100 = (adjusted / first(adjusted)) * 100,
+    Categoria = case_when(
+      symbol == "^GSPC" ~ "S&P 500",
+      symbol == "GC=F" ~ "Or",
+      symbol == "BTC-USD" ~ "Bitcoin"
+    )
+  ) %>%
+  ungroup() %>%
+  select(Mes_Any, Categoria, Index_Base100)
+
+index_pokemon_plot <- index_mercat_opcioB %>%
+  rename(Categoria = Vintage) %>%
+  mutate(Categoria = paste("Pokémon", Categoria)) %>% 
+  select(Mes_Any, Categoria, Index_Base100)
+
+dades_grafic_global <- bind_rows(index_pokemon_plot, index_macro)
+
+# generacio grafic
+ggplot(dades_grafic_global, aes(x = Mes_Any, y = Index_Base100, color = Categoria)) +
+  geom_line(linewidth = 1.1) +
+  scale_color_manual(values = c(
+    "Pokémon Vintage" = "#00BFC4",
+    "Pokémon Moderna" = "#F8766D",
+    "S&P 500"         = "#4daf4a",
+    "Or"              = "#e4c000",
+    "Bitcoin"         = "#ff7f00"  
+  )) +
+  scale_x_date(date_breaks = "1 year", date_labels = "%Y") +
+
+  scale_y_log10(labels = comma_format()) + 
+  
+  theme_minimal() +
+  labs(title = "Evolució Global: Col·leccionisme vs. Actius Tradicionals i Digitals",
+       x = "Temps",
+       y = "Índex Base 100 (Log10)",
+       color = "Actiu") +
+  theme(
+    legend.position = "bottom",
+    legend.title = element_text(face = "bold"),
+    panel.grid.minor = element_blank() 
+  )
+```
+
+## Matriu de correlacions de Pearson
+```{r}
+# Generem el gràfic visual
+corrplot(matriu_corr, 
+         method = "color", 
+         type = "lower", 
+         addCoef.col = "black", # Mostra els nombres dins els quadrats
+         tl.col = "black", tl.srt = 45, 
+         diag = FALSE,
+         title = "Matriu de Correlació: Actius de Col·leccionisme vs Tradicionals",
+         mar = c(0,0,2,0))
+```
+
+## Gràfics de dispersió
+
+### vs S&P 500
+```{r}
+dispersion_data <- bd_correlacions %>%
+  pivot_longer(cols = c(Poke_Vintage, Poke_Moderna), names_to = "Categoria_Pokemon", values_to = "Rendiment_Pokemon")
+
+ggplot(dispersion_data, aes(x = SP500, y = Rendiment_Pokemon, color = Categoria_Pokemon)) +
+  geom_point(alpha = 0.6) +
+  geom_smooth(method = "lm", se = FALSE, linetype = "dashed") + 
+  scale_color_manual(values = c("Poke_Vintage" = "#00BFC4", "Poke_Moderna" = "#F8766D"),
+                     labels = c("Moderna", "Vintage")) +
+  theme_minimal() +
+  labs(title = "Rendiment Pokémon vs S&P 500",
+       x = "Rendiment Mensual S&P 500",
+       y = "Rendiment Mensual Pokémon",
+       color = "Categoria")
+```
+
+### vs Or
+```{r}
+ggplot(dispersion_data, aes(x = Gold, y = Rendiment_Pokemon, color = Categoria_Pokemon)) +
+  geom_point(alpha = 0.6) +
+  geom_smooth(method = "lm", se = FALSE, linetype = "dashed") + 
+  scale_color_manual(values = c("Poke_Vintage" = "#00BFC4", "Poke_Moderna" = "#F8766D"),
+                     labels = c("Moderna", "Vintage")) +
+  theme_minimal() +
+  labs(title = "Rendiment Pokémon vs Or",
+       x = "Rendiment Mensual Or",
+       y = "Rendiment Mensual Pokémon",
+       color = "Categoria")
+```
+
+### vs Bitcoin
+```{r}
+ggplot(dispersion_data, aes(x = Bitcoin, y = Rendiment_Pokemon, color = Categoria_Pokemon)) +
+  geom_point(alpha = 0.6) +
+  geom_smooth(method = "lm", se = FALSE, linetype = "dashed") + 
+  scale_color_manual(values = c("Poke_Vintage" = "#00BFC4", "Poke_Moderna" = "#F8766D"),
+                     labels = c("Moderna", "Vintage")) +
+  theme_minimal() +
+  labs(title = "Sensibilitat del Mercat: Rendiment Pokémon vs Bitcoin",
+       x = "Rendiment Mensual Bitcoin",
+       y = "Rendiment Mensual Pokémon",
+       color = "Categoria")
+```

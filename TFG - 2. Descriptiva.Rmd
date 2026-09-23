@@ -1,0 +1,179 @@
+---
+title: "TFG - 2. Preprocessament i anàlisi descriptiva de la base de dades"
+author: "Joel Masdeu"
+date: "2026-03-16"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE, error = FALSE)
+```
+
+## Lectura de les dades
+```{r}
+library(readxl)
+dades <- read_excel("C:/Users/joelm/Downloads/TFG/bbdd_psacard.xlsx")
+
+
+
+dades$Price <- gsub(",", "", dades$Price)
+dades$Price <- as.numeric(dades$Price)
+dades$Date <- as.Date(dades$Date)
+dades$Vintage <- as.factor(dades$Vintage)
+
+# Etiquetem els dos nivells de Vintage:
+dades$Vintage <- factor(dades$Vintage, 
+                        levels = c(0, 1), 
+                        labels = c("Moderna", "Vintage"))
+
+library(dlookr)
+dlookr::diagnose(dades) #comprovar que després de modificar les variables no tenim cap missing.
+
+str(dades)
+```
+
+## Anàlisi exploratòria descriptiva de les dades (EDA)
+
+### Gràfics de les sèries temporals
+```{r}
+summary(dades)
+
+library(ggplot2)
+library(dplyr)
+
+# Gràfic cartes vintage
+grafic_vintage <- dades %>%
+  filter(Vintage == "Vintage") %>%
+  ggplot(aes(x = Date, y = Price)) +
+  geom_point(alpha = 0.5, size = 1.5, color = "#00BFC4") +
+  geom_line(alpha = 0.7, color = "#00BFC4") +
+  facet_wrap(~ ID_Card, scales = "free_y", ncol = 2) +
+  scale_x_date(date_labels = "%Y", date_breaks = "1 year") +
+  theme_minimal() +
+  labs(
+    title = "Evolució del preu - Cartes Vintage (1999-2000)",
+    x = "Data de venda",
+    y = "Preu (USD)"
+  ) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+print(grafic_vintage)
+
+
+# Gràfic cartes modernes
+grafic_modernes <- dades %>%
+  filter(Vintage == "Moderna") %>%
+  ggplot(aes(x = Date, y = Price)) +
+  geom_point(alpha = 0.5, size = 1.5, color = "#F8766D") +
+  geom_line(alpha = 0.7, color = "#F8766D") +
+  facet_wrap(~ ID_Card, scales = "free_y", ncol = 2) +
+  scale_x_date(date_labels = "%Y", date_breaks = "1 year") +
+  theme_minimal() +
+  labs(
+    title = "Evolució del preu - Cartes Modernes (2017-2021)",
+    x = "Data de transacció",
+    y = "Preu (USD)"
+  ) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+print(grafic_modernes)
+```
+
+
+### Tractament d'outliers univariant
+
+Observem que hi ha molts outliers puntuals (preus = 0 o exageradament elevats). Els eliminarem. Per a no eliminar de manera incorrecta valors, no utilitzaré la mitjana global sinó per "finestres de temps". Seria incorrecte eliminar una dada que surti de la mitjana global de totes les dades, perquè podria ser una dada normal en un determinat cicle (ex: en una de les bombolles). Un outlier a la finestra temporal del 2022-2023 podria no ser-ho al considerar la mitjana global degut a la influència de les bombolles especulatives de 2025 (a les cartes modernes). És per això que considero finestres de temps i faig el tractament basant-me en aquestes.
+
+Considero finestres temporals de 60 dies (30 dies abans i 30 dies després de la venda).
+
+(despres de comprovar aquesta opcio, vaig veure que feia eliminacions incorrectes ja que per exemple, en una finestra amb 3 vendes de 10$, i una de 5000$, s'eliminaven les de 10 degut a que la mitjana tirava mes cap a 5000 -efecte emmascarament-). És per això que directament passo a l'eliminació manual d'outliers.
+
+```{r}
+library(dplyr)
+
+# Filtres manuals per a cartes vintage i modernes
+dades_netes <- dades %>%
+  filter(
+    Price >= 10,
+  # vintage
+    !(ID_Card == "vin1_charizard_holo_baseset_psa9" & Price > 10000), 
+    !(ID_Card == "vin1_charizard_holo_baseset_psa9" & Date >= as.Date("2022-01-01") & Price > 4000),
+    !(ID_Card == "vin2_blastoise_holo_baseset_psa9" & Date >= as.Date("2022-01-01") & Price > 1500),    
+    !(ID_Card == "vin2_blastoise_holo_baseset_psa9" & Date >= as.Date("2021-01-01") & Price > 2000), 
+    !(ID_Card == "vin3_venusaur_holo_baseset_psa9" & Date >= as.Date("2023-01-01") & Price > 1000), 
+    !(ID_Card == "vin3_venusaur_holo_baseset_psa9" & Date >= as.Date("2021-01-01") & Price > 1750), 
+    !(ID_Card == "vin3_venusaur_holo_baseset_psa9" & Price > 4000), 
+    !(ID_Card == "vin4_mewtwo_holo_baseset_psa9" & Price > 900), 
+    !(ID_Card == "vin5_pikachu_yellowcheeks_baseset_psa9" & Price > 500),
+    !(ID_Card == "vin5_pikachu_yellowcheeks_baseset_psa9" & Date >= as.Date("2023-01-01") & Price > 150), 
+    !(ID_Card == "vin8_darkblastoise_holo_teamrocket_psa9" & Price > 500),
+    !(ID_Card == "vin9_darkcharizard_holo_teamrocket_psa9" & Price > 5000),
+    !(ID_Card == "vin10_ancientmew_promomovie_psa9" & Date >= as.Date("2023-01-01") & Price > 300),
+  # modernes
+    !(ID_Card == "mod1_mewtwogx_sr_shininglegends_psa10" & Date >= as.Date("2025-06-01") & Price < 1800), 
+    !(ID_Card == "mod3_charizardgx_shiny_hiddenfates_psa10" & Date >= as.Date("2021-01-01") & Price < 300), 
+    !(ID_Card == "mod4_charizardv_shiny_championspath_psa10" & Price > 4000),
+    !(ID_Card == "mod6_charizardvmax_shiny_shiningfates_psa10" & Price > 3000),
+    !(ID_Card == "mod6_charizardvmax_shiny_shiningfates_psa10" & Date >= as.Date("2022-01-01") & Price > 1000),
+    !(ID_Card == "mod6_charizardvmax_shiny_shiningfates_psa10" & Date >= as.Date("2023-01-01") & Price > 500),
+    !(ID_Card == "mod6_charizardvmax_shiny_shiningfates_psa10" & Date <= as.Date("2022-06-01") & Price < 250),
+    !(ID_Card == "mod7_sylveonvmax_altart_evolvingskies_psa10" & Price < 100),
+    !(ID_Card == "mod8_umbreonvmax_altart_evolvingskies_psa10" & Date >= as.Date("2025-01-01") & Price < 1500),
+    !(ID_Card == "mod9_rayquazavmax_altart_evolvingskies_psa10" & Date >= as.Date("2024-01-01") & Price < 250),
+    !(ID_Card == "mod10_gengarvmax_altart_fusionstrike_psa10" & Date >= as.Date("2024-01-01") & Price < 250)
+  )
+
+# Comprovació de la neteja
+print(paste("Registres abans:", nrow(dades)))
+print(paste("Registres ara:", nrow(dades_netes)))
+print(paste("Eliminats (errors o preus nuls):", nrow(dades) - nrow(dades_netes)))
+
+```
+
+Repetim els gràfics un cop fetes les correccions: 
+```{r}
+# Gràfic cartes vintage corregit
+grafic_vintage_corregit <- dades_netes %>%
+  filter(Vintage == "Vintage") %>%
+  ggplot(aes(x = Date, y = Price)) +
+  geom_point(alpha = 0.5, size = 1.5, color = "#00BFC4") +
+  geom_line(alpha = 0.7, color = "#00BFC4") +
+  facet_wrap(~ ID_Card, scales = "free_y", ncol = 2) +
+  scale_x_date(date_labels = "%Y", date_breaks = "1 year") +
+  theme_minimal() +
+  labs(
+    title = "Evolució del preu - Cartes Vintage (1999-2000)",
+    x = "Data de venda",
+    y = "Preu (USD)"
+  ) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+print(grafic_vintage_corregit)
+
+
+# Gràfic cartes modernes corregit
+grafic_modernes_corregit <- dades_netes %>%
+  filter(Vintage == "Moderna") %>%
+  ggplot(aes(x = Date, y = Price)) +
+  geom_point(alpha = 0.5, size = 1.5, color = "#F8766D") +
+  geom_line(alpha = 0.7, color = "#F8766D") +
+  facet_wrap(~ ID_Card, scales = "free_y", ncol = 2) +
+  scale_x_date(date_labels = "%Y", date_breaks = "1 year") +
+  theme_minimal() +
+  labs(
+    title = "Evolució del preu - Cartes Modernes (2017-2021)",
+    x = "Data de transacció",
+    y = "Preu (USD)"
+  ) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+print(grafic_modernes_corregit)
+
+```
+
+Amb això hem pogut tractar 155 outliers/errors de pricing a totes les cartes.
+
+```{r}
+saveRDS(dades_netes, "C:/Users/joelm/Downloads/TFG/dades_netes.rds")
+```
+

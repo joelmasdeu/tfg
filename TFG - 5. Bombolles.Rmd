@@ -1,0 +1,207 @@
+---
+title: "Anàlisi de bombolles especulatives"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE, error = FALSE)
+```
+
+## Lectura de les dades
+
+```{r}
+dades_netes <- readRDS("C:/Users/joelm/Downloads/TFG/dades_netes.rds")
+summary(dades_netes)
+llista_cartes <- unique(dades_netes$ID_Card)
+if(!dir.exists("grafics_bombolles2")) dir.create("grafics_bombolles2")
+
+library(dplyr)
+library(lubridate)
+
+#install.packages("remotes")
+#remotes::install_github("itamarcaspi/psymonitor")
+
+library(psymonitor)
+library(zoo)
+library(ggplot2)
+library(tidyr)
+```
+
+## Creació del bucle i implementació mètode PSY
+
+```{r}
+set.seed(123) 
+
+for (carta_id in llista_cartes) {
+  
+  print(paste("Processant:", carta_id))
+  
+  # Preparació de dades
+  df_temp <- dades_netes %>%
+    filter(ID_Card == carta_id) %>%
+    mutate(Mes_Any = floor_date(Date, "month")) %>%
+    group_by(Mes_Any) %>%
+    summarise(Preu_Mensual = mean(Price, na.rm = TRUE), .groups = 'drop') %>%
+    complete(Mes_Any = seq(min(Mes_Any), max(Mes_Any), by = "month")) %>%
+    mutate(Preu_Mensual = na.locf(Preu_Mensual, na.rm = FALSE)) %>%
+    mutate(Preu_Mensual = na.locf(Preu_Mensual, fromLast = TRUE))
+  
+  obs_totals <- nrow(df_temp)
+  
+  # micro-soroll blanc per evitar variància zero
+  soroll_blanc <- rnorm(obs_totals, mean = 0, sd = 0.0001)
+  y <- as.numeric(df_temp$Preu_Mensual) + soroll_blanc
+  dates <- df_temp$Mes_Any
+  
+  # Paràmetres PSY
+  r0 <- 0.01 + 1.8 / sqrt(obs_totals) 
+  swindow0 <- floor(r0 * obs_totals)
+  dim <- obs_totals - swindow0 + 1
+  IC <- 2 
+  
+  adflag <- 1 
+  
+  Tb <- min(12 * 2 + swindow0 - 1, obs_totals) 
+  
+  # Execució del Test PSY
+  bsadf <- tryCatch({
+    PSY(y, swindow0, IC, adflag)
+  }, error = function(e) {
+    print(paste("Error matemàtic intern a", carta_id, "tot i les correccions. Saltant."))
+    return(NULL)
+  })
+  
+  if(is.null(bsadf)) next 
+  
+  quantilesBsadf <- cvPSYwmboot(y, swindow0, IC, adflag, Tb, nboot = 99, nCores = 2)
+  
+  # Processament de resultats
+  dates_test <- as.Date(dates[swindow0:obs_totals]) 
+  quantiles_matrix <- quantilesBsadf %*% matrix(1, nrow = 1, ncol = dim)
+  
+  ind90 <- as.numeric((bsadf > t(quantiles_matrix[1, ])) * 1) 
+  
+  df_plot <- data.frame(
+    Date = dates_test,
+    Price = as.numeric(y[swindow0:obs_totals]), 
+    Bubble = ind90
+  )
+  
+  df_bombolles <- df_plot %>% filter(Bubble == 1)
+
+# Generació del gràfic
+  p <- ggplot(df_plot, aes(x = Date, y = Price)) +
+    geom_rect(data = df_bombolles, 
+              aes(xmin = Date, xmax = Date + months(1), ymin = -Inf, ymax = Inf), 
+              fill = "forestgreen", alpha = 0.45, inherit.aes = FALSE) +
+    geom_line(linewidth = 1) +
+    theme_minimal(base_size=18) +
+    
+   theme(
+      plot.title = element_text(size = 25, face = "bold", hjust = 0.5, margin = margin(b = 15)), 
+      axis.title = element_text(size = 28), 
+      axis.text = element_text(size = 22), 
+      plot.margin = margin(20, 20, 20, 20),
+      plot.background = element_rect(fill = "white", color = NA),
+      panel.background = element_rect(fill = "white", color = NA)
+    ) +
+    
+    labs(title = carta_id, x = "Data", y = "Preu (USD)")
+
+    ggsave(filename = paste0("grafics_bombolles2/", carta_id, ".png"), plot = p, width = 10, height = 6, bg = "white", dpi = 300)
+  
+}
+print("Procés finalitzat")
+```
+
+## Grafiquem tot junt
+
+```{r}
+library(patchwork)
+library(png)
+library(grid) 
+
+directori_origen <- "grafics_bombolles2/"
+directori_desti <- "./" 
+
+carregar_imatge_com_plot <- function(nom_fitxer) {
+  img <- readPNG(paste0(directori_origen, nom_fitxer))
+  g <- rasterGrob(img, interpolate = TRUE)
+  
+ p <- ggplot() +
+    annotation_custom(g, xmin=-Inf, xmax=Inf, ymin=-Inf, ymax=Inf) +
+    theme_void() + 
+    theme(
+      plot.margin = margin(5, 5, 5, 5), 
+      plot.background = element_rect(fill = "white", color = NA),
+      panel.background = element_rect(fill = "white", color = NA)
+    )
+  return(p)}
+
+# vintage
+
+print("Generant la composició Vintage...")
+
+plots_vintage <- list(
+  carregar_imatge_com_plot("vin1_charizard_holo_baseset_psa9.png"),
+  carregar_imatge_com_plot("vin2_blastoise_holo_baseset_psa9.png"),
+  carregar_imatge_com_plot("vin3_venusaur_holo_baseset_psa9.png"),
+  carregar_imatge_com_plot("vin4_mewtwo_holo_baseset_psa9.png"),
+  carregar_imatge_com_plot("vin5_pikachu_yellowcheeks_baseset_psa9.png"),
+  carregar_imatge_com_plot("vin6_dragonite_holo_fossil_psa9.png"),
+  carregar_imatge_com_plot("vin7_gengar_holo_fossil_psa9.png"),
+  carregar_imatge_com_plot("vin8_darkblastoise_holo_teamrocket_psa9.png"),
+  carregar_imatge_com_plot("vin9_darkcharizard_holo_teamrocket_psa9.png"),
+  carregar_imatge_com_plot("vin10_ancientmew_promomovie_psa9.png")
+)
+
+composicio_vintage <- wrap_plots(plots_vintage, ncol = 2, nrow = 5) +
+  plot_annotation(
+    title = "Comparativa de Bombolles Especulatives: Cartes Vintage (90% Confiança)",
+    subtitle = "Mètode PSY (Phillips, Shi i Yu, 2015). Zones verdes indiquen comportament explosiu.",
+    theme = theme(
+      plot.background = element_rect(fill = "white", color = NA),
+      text = element_text(family = "sans"),
+      plot.title = element_text(size = 25, face = "bold", hjust = 0.5, margin = margin(b = 20)),
+      plot.subtitle = element_text(size = 20, hjust = 0.5, margin = margin(b = 30))
+    )
+  )
+
+ggsave(paste0(directori_desti, "Vintage_Bombolles_Consolidat2.png"), 
+       plot = composicio_vintage, width = 14, height = 18, dpi = 300, bg = "white")
+
+
+# modernes
+
+print("Generant la composició Moderna...")
+
+plots_modernes <- list(
+  carregar_imatge_com_plot("mod1_mewtwogx_sr_shininglegends_psa10.png"),
+  carregar_imatge_com_plot("mod2_latiasandlatiosgx_altart_teamup_psa10.png"),
+  carregar_imatge_com_plot("mod3_charizardgx_shiny_hiddenfates_psa10.png"),
+  carregar_imatge_com_plot("mod4_charizardv_shiny_championspath_psa10.png"),
+  carregar_imatge_com_plot("mod5_pikachuvmax_rainbow_vividvoltage_psa10.png"),
+  carregar_imatge_com_plot("mod6_charizardvmax_shiny_shiningfates_psa10.png"),
+  carregar_imatge_com_plot("mod7_sylveonvmax_altart_evolvingskies_psa10.png"),
+  carregar_imatge_com_plot("mod8_umbreonvmax_altart_evolvingskies_psa10.png"),
+  carregar_imatge_com_plot("mod9_rayquazavmax_altart_evolvingskies_psa10.png"),
+  carregar_imatge_com_plot("mod10_gengarvmax_altart_fusionstrike_psa10.png")
+)
+
+composicio_modernes <- wrap_plots(plots_modernes, ncol = 2, nrow = 5) +
+  plot_annotation(
+    title = "Comparativa de Bombolles Especulatives: Cartes Modernes (90% Confiança)",
+    subtitle = "Mètode PSY (Phillips, Shi i Yu, 2015). Zones verdes indiquen comportament explosiu.",
+    theme = theme(
+      plot.background = element_rect(fill = "white", color = NA),
+      text = element_text(family = "sans"),
+      plot.title = element_text(size = 25, face = "bold", hjust = 0.5, margin = margin(b = 20)),
+      plot.subtitle = element_text(size = 20, hjust = 0.5, margin = margin(b = 30))
+    )
+  )
+
+ggsave(paste0(directori_desti, "Modernes_Bombolles_Consolidat2.png"), 
+       plot = composicio_modernes, width = 14, height = 18, dpi = 300, bg = "white")
+
+print("Procés finalitzat")
+```
